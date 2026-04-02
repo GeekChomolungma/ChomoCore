@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quant-strategy-infra"
+version = "0.1.0"
+description = "Modular quantitative strategy infrastructure with unified market context and signal contracts."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "PyYAML>=6.0.1",
+  "requests>=2.32",
+]
+
+[tool.setuptools.packages.find]
+include = ["quant_core*", "quant_backtest*", "quant_live*"]
