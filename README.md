@@ -1,107 +1,250 @@
-# Quant Strategy Infrastructure
+# ChomoCore
 
-This repository provides a modular quantitative trading foundation built around a unified market context and strategy signal contract.
+Modular quantitative trading infrastructure. One unified pipeline for both live trading and backtesting, switched by a single `mode` field in the config.
 
-## Project Layout
+## Package Layout
 
 ```text
-project/
-├─ quant_core/
-│  ├─ context/
-│  │  └─ market_context.py
-│  ├─ signal/
-│  │  └─ signal.py
-│  ├─ strategies/
-│  │  ├─ base.py
-│  │  ├─ rsi.py
-│  │  └─ ma_cross.py
-│  ├─ features/
-│  │  ├─ momentum.py
-│  │  ├─ volatility.py
-│  │  └─ ta.py
-│  └─ utils/
+chomocore/
+├── core/                    # canonical contracts — no I/O, no mode awareness
+│   ├── context/             # MarketContext
+│   ├── signal/              # StrategySignal
+│   ├── indicators/          # pluggable indicator functions + registry
+│   ├── strategies/          # BaseStrategy + StrategyRegistry + built-ins
+│   ├── execution/           # BaseExecutor contract
+│   └── utils/               # validation helpers
 │
-├─ quant_backtest/
-│  ├─ data/
-│  ├─ replay/
-│  ├─ broker/
-│  ├─ metrics/
-│  ├─ plots/
-│  └─ main.py
+├── pipeline/                # mode-agnostic pipeline wiring
+│   ├── indicator_pipeline.py
+│   ├── context_builder.py
+│   └── runner.py            # TradingPipeline (shared by live & backtest)
 │
-├─ quant_live/
-│  ├─ data/
-│  ├─ runtime/
-│  ├─ transport/
-│  ├─ state/
-│  └─ main.py
+├── backtest/                # replay-mode components
+│   ├── data/                # HistoricalDataSource (Mongo placeholder + synthetic)
+│   ├── broker/              # SimulatedBroker
+│   ├── metrics/             # performance metrics
+│   ├── plots/               # equity curve summary
+│   └── runner.py            # BacktestRunner
 │
-├─ configs/
-│  ├─ backtest/
-│  └─ live/
-└─ pyproject.toml
+├── live/                    # live-mode components
+│   ├── data/                # LiveDataSource (Redis placeholder + Mongo placeholder)
+│   ├── state/               # PositionState
+│   ├── transport/           # HttpSignalExecutor
+│   └── runner.py            # LiveRunner
+│
+├── engine/                  # unified CLI entry point
+│   ├── config.py
+│   └── main.py
+│
+└── configs/
+    ├── backtest/example.yaml
+    └── live/example.yaml
 ```
 
-## Core Contract
+---
 
-`quant_core` is the canonical boundary between upstream market data, pluggable strategy logic, and downstream execution or replay systems.
+## Pipeline Architecture
 
-### `MarketContext`
+Both modes share the same 5-layer pipeline. The only difference is how bars are sourced and how signals are executed.
 
-`MarketContext` is the standardized input for all strategies.
+```text
+ ┌──────────────────────────────────────────────────────────────────────┐
+ │                        UNIFIED PIPELINE                              │
+ │                                                                      │
+ │  ① Raw Data         ② Indicators        ③ MarketContext              │
+ │  ┌──────────┐       ┌──────────────┐     ┌───────────────────────┐   │
+ │  │ OHLCV    │──────▶│ super_trend  │───▶│ MarketContext         │   │
+ │  │ bars     │       │  RSI         │     │  .symbol              │   │
+ │  │ (window) │       │  vol_band    │     │  .timeframe           │   │
+ │  └──────────┘       │  ...         │     │  .timestamp           │   │
+ │                     └──────────────┘     │  .bars   (enriched)   │   │
+ │                                          │  .features (indicator)│   │
+ │                                          └───────────────────────┘   │
+ │                                                                      │
+ │                                                                      │
+ │  ④ Strategy                           ⑤ Execution                    │
+ │  ┌──────────────────────┐             ┌───────────────────────────┐  │
+ │  │ BaseStrategy         │             │ BaseExecutor              │  │
+ │  │  .evaluate(context)  │────signal──▶│                          │  │ 
+ │  │                      │             │ live     → HTTP POST      │  │
+ │  │  StrategySignal:     │             │ backtest → SimulatedBroker│  │
+ │  │   direction          │             │          (record only)    │  │
+ │  │   target_position    │             └───────────────────────────┘  │
+ │  │   score / confidence │                                            │
+ │  └──────────────────────┘                                            │
+ └──────────────────────────────────────────────────────────────────────┘
+```
 
-Required `bars` contract:
+---
 
-- columns must include `open`, `high`, `low`, `close`, `volume`
-- index must be a `pd.DatetimeIndex`
-- rows must be sorted in ascending time order
-- the last row timestamp must equal `timestamp`
-- data is expected to be pre-cleaned, deduplicated, aligned, and ready for strategy consumption
+## Layer Details
 
-Optional `bars` columns:
+### 1. Raw Data Layer
 
-- `quote_volume`
-- `trade_count`
-- `taker_buy_volume`
-- `is_closed`
+#### Live mode
 
-### `StrategySignal`
+- Closed K-lines are stored in MongoDB (producer already implemented externally).
+- The in-progress (open) K-line is held in Redis.
+- `live.data.RedisLiveDataSource` fetches the latest rolling window and returns it as a plain `pd.DataFrame`.
 
-Every strategy returns a normalized signal with:
+#### Backtest mode
 
-- `direction`: `long`, `short`, or `flat`
-- `target_position`: normalized exposure in `[-1.0, 1.0]`
-- optional `score`, `confidence`, and `meta`
+- `backtest.data.MongoHistoricalDataSource` loads closed K-lines from MongoDB (placeholder — schema TBD).
+- `backtest.data.SyntheticOHLCVDataSource` generates random-walk OHLCV for local development.
 
-## Extension Points
+**Required bar columns:** `open`, `high`, `low`, `close`, `volume`
+**Index:** `pd.DatetimeIndex`, ascending, no duplicates.
 
-- Add new hand-crafted strategies by subclassing `BaseStrategy`
-- Add predictive models by building features from `MarketContext` and wrapping model output into `StrategySignal`
-- Register strategies with `StrategyRegistry` so they can be instantiated from config
-- Connect Mongo historical data and Redis real-time data by implementing the provider interfaces in `quant_backtest.data` and `quant_live.data`
+---
+
+### 2. Indicator Layer
+
+Indicators are pure functions with the signature:
+
+```python
+def add_xxx(df: pd.DataFrame, **params) -> pd.DataFrame:
+    ...  # return df with new columns appended
+```
+
+**Causality rule:** `indicator[t]` must depend only on `rows[0:t+1]`. No centered windows, no future leakage.
+
+Built-in indicators (in `core/indicators/`):
+
+| Name | Output columns | Key params |
+| --- | --- | --- |
+| `rsi` | `rsi_{length}` | `length`, `source` |
+| `super_trend` | `st_value`, `st_direction` | `length`, `factor`, `source` |
+| `volatility_band` | `reversal_upper`, `reversal_lower` | `length`, `mult`, `atr_mult` |
+
+Add a custom indicator:
+
+```python
+from core.indicators import register_indicator
+
+def add_my_indicator(df, window=20):
+    out = df.copy()
+    out["my_col"] = df["close"].rolling(window).mean()
+    return out
+
+register_indicator("my_indicator", add_my_indicator)
+```
+
+Configure in YAML:
+
+```yaml
+indicators:
+  - name: rsi
+    params:
+      length: 14
+  - name: my_indicator
+    params:
+      window: 20
+```
+
+`IndicatorPipeline` applies specs in order, so each indicator can reference columns added by earlier ones.
+
+---
+
+### 3. MarketContext (State Layer)
+
+`MarketContext` is the central state object passed to every strategy:
+
+```python
+@dataclass
+class MarketContext:
+    symbol: str
+    timeframe: str
+    timestamp: pd.Timestamp
+    bars: pd.DataFrame       # OHLCV + all indicator columns (full history window)
+    features: dict | None    # latest value of each indicator column (O(1) access)
+    market_meta: dict | None # source metadata (e.g. {"source": "redis"})
+```
+
+`features` gives strategies quick scalar access (`context.features["rsi_14"]`) while `bars` gives the full series for strategies that need historical depth.
+
+---
+
+### 4. Strategy & Signal Layer
+
+Implement a strategy by subclassing `BaseStrategy`:
+
+```python
+from core.strategies.base import BaseStrategy
+from core.strategies.registry import StrategyRegistry
+from core.signal.signal import StrategySignal
+
+@StrategyRegistry.register("my_strategy")
+class MyStrategy(BaseStrategy):
+    def __init__(self, threshold: float = 0.5):
+        super().__init__("my_strategy")
+        self.threshold = threshold
+
+    def evaluate(self, context: MarketContext) -> StrategySignal:
+        rsi = context.features["rsi_14"]
+        direction = "long" if rsi < self.threshold else "flat"
+        ...
+```
+
+`StrategySignal` fields:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `direction` | `"long"` / `"short"` / `"flat"` | trade intent |
+| `target_position` | `float` in `[-1.0, 1.0]` | normalised exposure |
+| `score` | `float \| None` | raw indicator score |
+| `confidence` | `float \| None` | clamped to `[0, 1]` |
+| `meta` | `dict \| None` | arbitrary strategy debug info |
+
+---
+
+### 5. Execution Layer
+
+| Mode | Executor | Behaviour |
+| --- | --- | --- |
+| `live` | `HttpSignalExecutor` | POST signal JSON to downstream endpoint; `dry_run=true` skips HTTP |
+| `backtest` | `SimulatedBroker` | Records target positions; builds equity curve after loop |
+
+Both implement `BaseExecutor.handle(signal) -> dict`.
+
+---
 
 ## Quick Start
 
-Install dependencies:
+Install:
 
 ```bash
 pip install -e .
 ```
 
-Run the demo backtest:
+Run backtest:
 
 ```bash
-python -m quant_backtest.main --config configs/backtest/example.yaml
+python -m engine.main --config configs/backtest/example.yaml
 ```
 
-Run the live engine skeleton:
+Run live engine (dry-run):
 
 ```bash
-python -m quant_live.main --config configs/live/example.yaml
+python -m engine.main --config configs/live/example.yaml
 ```
 
-## Notes
+---
 
-- The current backtest and live modules are intentionally lightweight scaffolds.
-- Data-source adapters for Mongo and Redis are abstracted and can be replaced without changing strategy code.
-- The live executor sends normalized signals to downstream systems over HTTP.
+## Extension Points
+
+| Goal | Where |
+| --- | --- |
+| New indicator | Add function to `core/indicators/`, call `register_indicator()` |
+| New strategy | Subclass `BaseStrategy`, decorate with `@StrategyRegistry.register("name")` |
+| Connect real MongoDB | Implement `backtest.data.MongoHistoricalDataSource.load_bars()` |
+| Connect real Redis | Implement `live.data.RedisLiveDataSource.get_latest_context()` |
+| Real order execution | Subclass `BaseExecutor`, set `dry_run=false` or replace executor in config |
+| Indicator persistence | Add a `persistence` hook after `IndicatorPipeline.apply()` in `TradingPipeline.step()` |
+
+---
+
+## Design Constraints
+
+- **No look-ahead bias.** All indicator functions must satisfy `indicator[t] = f(rows[0:t+1])`.
+- **Mode is config, not code.** Live and backtest share `TradingPipeline`. Switching modes changes only the data source and executor, not any strategy or indicator logic.
+- **`core/` has no I/O.** Nothing in `core/` reads files, talks to Redis/Mongo, or makes HTTP calls. It is safe to import in any context.

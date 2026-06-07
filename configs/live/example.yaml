@@ -1,10 +1,22 @@
+mode: live
 symbol: BTCUSDT
 timeframe: 1m
 
 data:
+  # Source will be Redis (live) or Mongo (historical window for warmup).
+  # Until the real adapter is wired, synthetic data is used as a stand-in.
   start: 2024-01-01
   periods: 200
   seed: 7
+
+indicators:
+  - name: rsi
+    params:
+      length: 14
+  - name: super_trend
+    params:
+      length: 10
+      factor: 5.0
 
 strategy:
   name: rsi

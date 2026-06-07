@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "quant-strategy-infra"
-version = "0.1.0"
-description = "Modular quantitative strategy infrastructure with unified market context and signal contracts."
+name = "chomocore"
+version = "0.2.0"
+description = "Modular quantitative trading infrastructure — unified pipeline for live trading and backtesting."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -16,4 +16,4 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["quant_core*", "quant_backtest*", "quant_live*"]
+include = ["core*", "pipeline*", "backtest*", "live*", "engine*"]

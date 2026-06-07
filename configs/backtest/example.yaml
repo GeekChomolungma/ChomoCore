@@ -1,3 +1,4 @@
+mode: backtest
 symbol: BTCUSDT
 timeframe: 1h
 
@@ -5,6 +6,20 @@ data:
   start: 2024-01-01
   periods: 400
   seed: 7
+
+indicators:
+  - name: rsi
+    params:
+      length: 14
+  - name: super_trend
+    params:
+      length: 10
+      factor: 5.0
+  - name: volatility_band
+    params:
+      length: 20
+      mult: 2.0
+      atr_mult: 1.5
 
 strategy:
   name: ma_cross
