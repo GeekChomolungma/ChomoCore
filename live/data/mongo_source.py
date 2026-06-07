@@ -2,44 +2,43 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtest.data.base import HistoricalDataSource
+from core.context.market_context import MarketContext
+from infra.mongo.kline_repo import KlineRepository
+from live.data.base import LiveDataSource
 
 
-class MongoHistoricalDataSource(HistoricalDataSource):
+class MongoLiveDataSource(LiveDataSource):
     """
-    Placeholder for a MongoDB-backed historical bar loader.
+    LiveDataSource backed by KlineRepository.
 
-    Replace the body of load_bars() with real pymongo logic once the
-    collection schema and connection details are confirmed. The expected
-    document format will be provided separately.
+    Fetches the latest `window_size` closed K-lines from MongoDB to serve
+    as the indicator warmup window. This is the historical half of the live
+    data picture; the in-progress (open) bar will be merged from Redis once
+    that adapter is implemented.
 
-    Assumed document shape (to be confirmed):
-        {
-            "symbol":     str,
-            "timeframe":  str,
-            "open_time":  int (ms epoch),
-            "open":       float,
-            "high":       float,
-            "low":        float,
-            "close":      float,
-            "volume":     float,
-            ...
-        }
+    window_size should be at least max(indicator_lookback) + 1 so that all
+    indicators have enough history to produce non-NaN values on the last bar.
     """
 
-    def __init__(self, uri: str, db: str, collection: str) -> None:
-        self.uri = uri
-        self.db = db
-        self.collection = collection
+    def __init__(self, repo: KlineRepository, window_size: int = 200) -> None:
+        self._repo = repo
+        self._window_size = window_size
 
-    def load_bars(
-        self,
-        symbol: str,
-        timeframe: str,
-        start: str | None = None,
-        end: str | None = None,
-    ) -> pd.DataFrame:
-        raise NotImplementedError(
-            "MongoHistoricalDataSource.load_bars() is a placeholder. "
-            "Implement once the collection schema is confirmed."
+    def get_latest_context(self, symbol: str, timeframe: str) -> MarketContext:
+        bars = self._repo.load_latest(
+            symbol=symbol,
+            timeframe=timeframe,
+            n=self._window_size,
+        )
+        if bars.empty:
+            raise RuntimeError(
+                f"No kline data found for {symbol} {timeframe}. "
+                "Check that the MongoDB collection exists and contains data."
+            )
+        return MarketContext(
+            symbol=symbol,
+            timeframe=timeframe,
+            timestamp=pd.Timestamp(bars.index[-1]),
+            bars=bars,
+            market_meta={"source": "mongo", "window_size": self._window_size},
         )

@@ -2,9 +2,17 @@ mode: live
 symbol: BTCUSDT
 timeframe: 1m
 
+# MongoDB connection (remove to use synthetic dev fallback)
+mongo:
+  uri: mongodb://localhost:27017
+  db: market_info
+  exchange: Binance
+
 data:
-  # Source will be Redis (live) or Mongo (historical window for warmup).
-  # Until the real adapter is wired, synthetic data is used as a stand-in.
+  # Number of recent closed bars to load as the indicator warmup window.
+  # Must be >= max(indicator lookback) + a safety margin.
+  window_size: 200
+  # Synthetic fallback params (only used when mongo section is absent)
   start: 2024-01-01
   periods: 200
   seed: 7

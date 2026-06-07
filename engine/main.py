@@ -5,7 +5,7 @@ import argparse
 import core.strategies.ma_cross  # noqa: F401 — register strategy
 import core.strategies.rsi  # noqa: F401 — register strategy
 from core.strategies.registry import StrategyRegistry
-from engine.config import load_config
+from engine.config import build_mongo_repo, load_config
 from pipeline.indicator_pipeline import IndicatorPipeline
 
 
@@ -27,21 +27,36 @@ def main() -> None:
         config.get("indicators", [])
     )
 
+    # Build KlineRepository once; both runners consume it via their adapters.
+    kline_repo = build_mongo_repo(config)
+
     if mode == "backtest":
-        _run_backtest(config, symbol, timeframe, strategy, indicator_pipeline)
+        _run_backtest(config, symbol, timeframe, strategy, indicator_pipeline, kline_repo)
     else:
-        _run_live(config, symbol, timeframe, strategy, indicator_pipeline)
+        _run_live(config, symbol, timeframe, strategy, indicator_pipeline, kline_repo)
 
 
-def _run_backtest(config, symbol, timeframe, strategy, indicator_pipeline) -> None:
-    from backtest.data.synthetic import SyntheticOHLCVDataSource
+def _run_backtest(config, symbol, timeframe, strategy, indicator_pipeline, kline_repo) -> None:
     from backtest.runner import BacktestRunner
 
     data_cfg = config.get("data", {})
-    bars = SyntheticOHLCVDataSource(
-        periods=data_cfg.get("periods", 300),
-        seed=data_cfg.get("seed", 7),
-    ).load_bars(symbol=symbol, timeframe=timeframe, start=data_cfg.get("start"))
+
+    if kline_repo is not None:
+        from backtest.data.mongo_source import MongoHistoricalDataSource
+        datasource = MongoHistoricalDataSource(kline_repo)
+    else:
+        from backtest.data.synthetic import SyntheticOHLCVDataSource
+        datasource = SyntheticOHLCVDataSource(
+            periods=data_cfg.get("periods", 300),
+            seed=data_cfg.get("seed", 7),
+        )
+
+    bars = datasource.load_bars(
+        symbol=symbol,
+        timeframe=timeframe,
+        start=data_cfg.get("start"),
+        end=data_cfg.get("end"),
+    )
 
     runner = BacktestRunner(
         strategy=strategy,
@@ -52,27 +67,33 @@ def _run_backtest(config, symbol, timeframe, strategy, indicator_pipeline) -> No
     runner.report(result)
 
 
-def _run_live(config, symbol, timeframe, strategy, indicator_pipeline) -> None:
-    from backtest.data.synthetic import SyntheticOHLCVDataSource
-    from live.data.redis_source import RedisLiveDataSource
+def _run_live(config, symbol, timeframe, strategy, indicator_pipeline, kline_repo) -> None:
     from live.runner import LiveRunner
     from live.transport.http_executor import HttpSignalExecutor
 
-    data_cfg = config.get("data", {})
     exec_cfg = config.get("execution", {})
+    data_cfg = config.get("data", {})
 
-    # Until the real Redis adapter is wired up, fall back to synthetic data
-    # for local development. Replace RedisLiveDataSource with the real impl
-    # once the producer protocol is confirmed.
-    bars = SyntheticOHLCVDataSource(
-        periods=data_cfg.get("periods", 200),
-        seed=data_cfg.get("seed", 7),
-    ).load_bars(symbol=symbol, timeframe=timeframe, start=data_cfg.get("start"))
+    if kline_repo is not None:
+        from live.data.mongo_source import MongoLiveDataSource
+        datasource = MongoLiveDataSource(
+            repo=kline_repo,
+            window_size=data_cfg.get("window_size", 200),
+        )
+    else:
+        # Dev fallback: synthetic data standing in for Redis/Mongo.
+        from backtest.data.synthetic import SyntheticOHLCVDataSource
+        from live.data.redis_source import RedisLiveDataSource
+        bars = SyntheticOHLCVDataSource(
+            periods=data_cfg.get("periods", 200),
+            seed=data_cfg.get("seed", 7),
+        ).load_bars(symbol=symbol, timeframe=timeframe, start=data_cfg.get("start"))
+        datasource = RedisLiveDataSource(bars=bars)
 
     runner = LiveRunner(
         strategy=strategy,
         indicator_pipeline=indicator_pipeline,
-        datasource=RedisLiveDataSource(bars=bars),
+        datasource=datasource,
         executor=HttpSignalExecutor(
             endpoint=exec_cfg.get("endpoint", "http://localhost:8080/signal"),
             timeout=exec_cfg.get("timeout", 3.0),

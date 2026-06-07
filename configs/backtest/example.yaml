@@ -2,8 +2,16 @@ mode: backtest
 symbol: BTCUSDT
 timeframe: 1h
 
+# MongoDB connection (remove this section to fall back to synthetic data)
+mongo:
+  uri: mongodb://localhost:27017
+  db: market_info
+  exchange: Binance
+
 data:
-  start: 2024-01-01
+  start: 2024-01-01   # optional, passed to KlineRepository.load_bars
+  end:                 # optional, leave blank for all data up to now
+  # periods / seed are only used when mongo section is absent (synthetic fallback)
   periods: 400
   seed: 7
 
