@@ -15,32 +15,31 @@ def load_config(path: str) -> dict[str, Any]:
         raise ValueError(
             f"config must specify mode: 'live' or 'backtest', got: {mode!r}"
         )
-
     return cfg
 
 
-def build_mongo_repo(cfg: dict[str, Any]):
+def build_datasource(cfg: dict[str, Any]):
     """
-    Construct a KlineRepository from the `mongo` config section.
-
-    Returns None if no `mongo` section is present (caller falls back to
-    synthetic data).
+    Build a KlineRepository from the `mongo` config section.
 
     Expected config shape:
         mongo:
           uri: mongodb://localhost:27017
           db: market_info
-          exchange: Binance   # optional, default Binance
+          exchange: Binance   # optional, defaults to Binance
+
+    # TODO: add a `redis` section here once the Redis producer protocol is
+    # confirmed, to support a RedisDataSource for the live in-progress bar.
     """
     if "mongo" not in cfg:
-        return None
+        raise ValueError(
+            "Missing required `mongo` section in config. "
+            "Provide a MongoDB URI to use as the K-line data source."
+        )
 
     from infra.mongo.client import MongoClientFactory
     from infra.mongo.kline_repo import KlineRepository
 
-    mongo_cfg = cfg["mongo"]
-    db = MongoClientFactory.get_db(
-        uri=mongo_cfg["uri"],
-        db_name=mongo_cfg.get("db", "market_info"),
-    )
-    return KlineRepository(db, exchange=mongo_cfg.get("exchange", "Binance"))
+    m = cfg["mongo"]
+    db = MongoClientFactory.get_db(uri=m["uri"], db_name=m.get("db", "market_info"))
+    return KlineRepository(db, exchange=m.get("exchange", "Binance"))

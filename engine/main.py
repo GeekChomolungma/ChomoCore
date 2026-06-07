@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
+from typing import Any
 
 import core.strategies.ma_cross  # noqa: F401 — register strategy
 import core.strategies.rsi  # noqa: F401 — register strategy
+from backtest.broker.simulated import SimulatedBroker
+from backtest.metrics.performance import compute_performance_metrics
+from backtest.plots.equity import equity_summary
 from core.strategies.registry import StrategyRegistry
-from engine.config import build_mongo_repo, load_config
+from engine.config import build_datasource, load_config
+from live.state.position_state import PositionState
+from live.transport.http_executor import HttpSignalExecutor
 from pipeline.indicator_pipeline import IndicatorPipeline
+from pipeline.runner import TradingPipeline
 
 
 def main() -> None:
@@ -23,33 +31,23 @@ def main() -> None:
         config["strategy"]["name"],
         **config["strategy"].get("params", {}),
     )
-    indicator_pipeline = IndicatorPipeline.from_config(
-        config.get("indicators", [])
-    )
-
-    # Build KlineRepository once; both runners consume it via their adapters.
-    kline_repo = build_mongo_repo(config)
+    indicator_pipeline = IndicatorPipeline.from_config(config.get("indicators", []))
+    pipeline = TradingPipeline(strategy, indicator_pipeline)
+    datasource = build_datasource(config)
 
     if mode == "backtest":
-        _run_backtest(config, symbol, timeframe, strategy, indicator_pipeline, kline_repo)
+        _run_backtest(config, symbol, timeframe, pipeline, datasource)
     else:
-        _run_live(config, symbol, timeframe, strategy, indicator_pipeline, kline_repo)
+        _run_live(config, symbol, timeframe, pipeline, datasource)
 
 
-def _run_backtest(config, symbol, timeframe, strategy, indicator_pipeline, kline_repo) -> None:
-    from backtest.runner import BacktestRunner
+# ---------------------------------------------------------------------------
+# Backtest: load full bar history, replay step-by-step in a rolling window
+# ---------------------------------------------------------------------------
 
+def _run_backtest(config, symbol, timeframe, pipeline: TradingPipeline, datasource) -> None:
     data_cfg = config.get("data", {})
-
-    if kline_repo is not None:
-        from backtest.data.mongo_source import MongoHistoricalDataSource
-        datasource = MongoHistoricalDataSource(kline_repo)
-    else:
-        from backtest.data.synthetic import SyntheticOHLCVDataSource
-        datasource = SyntheticOHLCVDataSource(
-            periods=data_cfg.get("periods", 300),
-            seed=data_cfg.get("seed", 7),
-        )
+    warmup_bars: int = config.get("backtest", {}).get("warmup_bars", 50)
 
     bars = datasource.load_bars(
         symbol=symbol,
@@ -58,51 +56,63 @@ def _run_backtest(config, symbol, timeframe, strategy, indicator_pipeline, kline
         end=data_cfg.get("end"),
     )
 
-    runner = BacktestRunner(
-        strategy=strategy,
-        indicator_pipeline=indicator_pipeline,
-        warmup_bars=config.get("backtest", {}).get("warmup_bars", 50),
+    broker = SimulatedBroker()
+    signals: list[dict[str, Any]] = []
+
+    for end_idx in range(warmup_bars, len(bars)):
+        window = bars.iloc[: end_idx + 1]
+        _, signal = pipeline.step(symbol, timeframe, window)
+        broker.handle(signal)
+        signals.append({
+            "timestamp": signal.timestamp,
+            "direction": signal.direction,
+            "target_position": signal.target_position,
+            "score": signal.score,
+            "confidence": signal.confidence,
+        })
+
+    active_index = bars.index[warmup_bars:]
+    positions = broker.position_series(index=active_index)
+    forward_returns = (
+        bars["close"].pct_change().shift(-1).reindex(active_index).fillna(0.0)
     )
-    result = runner.run(symbol=symbol, timeframe=timeframe, bars=bars)
-    runner.report(result)
+    strategy_returns = positions.shift(1).fillna(0.0) * forward_returns
+    equity_curve = (1.0 + strategy_returns).cumprod()
+    metrics = compute_performance_metrics(strategy_returns, equity_curve)
+
+    print("Backtest metrics:")
+    for key, value in metrics.items():
+        print(f"  {key}: {value:.6f}")
+    print(equity_summary(equity_curve))
 
 
-def _run_live(config, symbol, timeframe, strategy, indicator_pipeline, kline_repo) -> None:
-    from live.runner import LiveRunner
-    from live.transport.http_executor import HttpSignalExecutor
+# ---------------------------------------------------------------------------
+# Live: load latest N bars (indicator warmup window), run one step
+# ---------------------------------------------------------------------------
 
-    exec_cfg = config.get("execution", {})
+def _run_live(config, symbol, timeframe, pipeline: TradingPipeline, datasource) -> None:
     data_cfg = config.get("data", {})
+    exec_cfg = config.get("execution", {})
+    window_size: int = data_cfg.get("window_size", 200)
 
-    if kline_repo is not None:
-        from live.data.mongo_source import MongoLiveDataSource
-        datasource = MongoLiveDataSource(
-            repo=kline_repo,
-            window_size=data_cfg.get("window_size", 200),
-        )
-    else:
-        # Dev fallback: synthetic data standing in for Redis/Mongo.
-        from backtest.data.synthetic import SyntheticOHLCVDataSource
-        from live.data.redis_source import RedisLiveDataSource
-        bars = SyntheticOHLCVDataSource(
-            periods=data_cfg.get("periods", 200),
-            seed=data_cfg.get("seed", 7),
-        ).load_bars(symbol=symbol, timeframe=timeframe, start=data_cfg.get("start"))
-        datasource = RedisLiveDataSource(bars=bars)
+    bars = datasource.load_latest(symbol=symbol, timeframe=timeframe, n=window_size)
 
-    runner = LiveRunner(
-        strategy=strategy,
-        indicator_pipeline=indicator_pipeline,
-        datasource=datasource,
-        executor=HttpSignalExecutor(
-            endpoint=exec_cfg.get("endpoint", "http://localhost:8080/signal"),
-            timeout=exec_cfg.get("timeout", 3.0),
-            dry_run=exec_cfg.get("dry_run", True),
-        ),
+    state = PositionState()
+    executor = HttpSignalExecutor(
+        endpoint=exec_cfg.get("endpoint", "http://localhost:8080/signal"),
+        timeout=exec_cfg.get("timeout", 3.0),
+        dry_run=exec_cfg.get("dry_run", True),
     )
 
-    result = runner.step(symbol=symbol, timeframe=timeframe)
-    print(result)
+    _, signal = pipeline.step(symbol, timeframe, bars)
+    state.update(signal)
+    execution = executor.handle(signal)
+
+    print({
+        "signal": {**asdict(signal), "timestamp": signal.timestamp.isoformat()},
+        "execution": execution,
+        "position": state.get(symbol),
+    })
 
 
 if __name__ == "__main__":
