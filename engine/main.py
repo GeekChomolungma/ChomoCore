@@ -9,11 +9,9 @@ import core.strategies.rsi  # noqa: F401 — register strategy
 from backtest.broker.simulated import SimulatedBroker
 from backtest.metrics.performance import compute_performance_metrics
 from backtest.plots.equity import equity_summary
-from core.strategies.registry import StrategyRegistry
 from engine.config import build_datasource, load_config
 from live.state.position_state import PositionState
 from live.transport.http_executor import HttpSignalExecutor
-from pipeline.indicator_pipeline import IndicatorPipeline
 from pipeline.runner import TradingPipeline
 
 
@@ -27,12 +25,7 @@ def main() -> None:
     symbol: str = config["symbol"]
     timeframe: str = config["timeframe"]
 
-    strategy = StrategyRegistry.create(
-        config["strategy"]["name"],
-        **config["strategy"].get("params", {}),
-    )
-    indicator_pipeline = IndicatorPipeline.from_config(config.get("indicators", []))
-    pipeline = TradingPipeline(strategy, indicator_pipeline)
+    pipeline = TradingPipeline.from_config(config)
     datasource = build_datasource(config)
 
     if mode == "backtest":

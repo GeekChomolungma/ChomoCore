@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
@@ -8,24 +7,17 @@ import pandas as pd
 from core.context.market_context import MarketContext
 from core.signal.signal import StrategySignal
 from core.strategies.base import BaseStrategy
+from core.strategies.registry import StrategyRegistry
 from pipeline.context_builder import build_context
 from pipeline.indicator_pipeline import IndicatorPipeline
-
-
-@dataclass
-class StepResult:
-    context: MarketContext
-    signal: StrategySignal
-    execution: dict[str, Any]
 
 
 class TradingPipeline:
     """
     Mode-agnostic pipeline core: bars → indicators → context → signal.
 
-    This class is shared between BacktestRunner and LiveRunner. It has no
-    knowledge of how bars are sourced or how signals are executed — those
-    responsibilities belong to the mode-specific runners.
+    Construct via from_config() to wire strategy and indicators from a
+    config dict. The engine only needs to deal with this single object.
     """
 
     def __init__(
@@ -35,6 +27,17 @@ class TradingPipeline:
     ) -> None:
         self.strategy = strategy
         self.indicator_pipeline = indicator_pipeline
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> TradingPipeline:
+        strategy = StrategyRegistry.create(
+            config["strategy"]["name"],
+            **config["strategy"].get("params", {}),
+        )
+        indicator_pipeline = IndicatorPipeline.from_config(
+            config.get("indicators", [])
+        )
+        return cls(strategy, indicator_pipeline)
 
     def step(
         self,
