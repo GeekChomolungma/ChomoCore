@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.context.market_context import MarketContext
+from core.context.market_bundle import MarketBundle
 from core.indicators.rsi import add_rsi
 from core.signal.signal import StrategySignal
 from core.strategies.base import BaseStrategy
@@ -29,7 +29,8 @@ class RSIStrategy(BaseStrategy):
         super().__init__("rsi")
         self.params = RSIParams(window, oversold, overbought, max_position)
 
-    def evaluate(self, context: MarketContext) -> StrategySignal:
+    def evaluate(self, bundle: MarketBundle) -> StrategySignal:
+        context = bundle.primary
         col = f"rsi_{self.params.window}"
 
         if context.features and col in context.features:

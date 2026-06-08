@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.context.market_context import MarketContext
+from core.context.market_bundle import MarketBundle
 from core.indicators.ta_utils import sma
 from core.signal.signal import StrategySignal
 from core.strategies.base import BaseStrategy
@@ -29,7 +29,8 @@ class MovingAverageCrossStrategy(BaseStrategy):
             raise ValueError("fast_window must be smaller than slow_window")
         self.params = MACrossParams(fast_window, slow_window, max_position)
 
-    def evaluate(self, context: MarketContext) -> StrategySignal:
+    def evaluate(self, bundle: MarketBundle) -> StrategySignal:
+        context = bundle.primary
         closes = context.bars["close"]
         fast_value = float(sma(closes, self.params.fast_window).iloc[-1])
         slow_value = float(sma(closes, self.params.slow_window).iloc[-1])

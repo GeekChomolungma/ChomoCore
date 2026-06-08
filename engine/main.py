@@ -4,6 +4,8 @@ import argparse
 from dataclasses import asdict
 from typing import Any
 
+import pandas as pd
+
 import core.strategies.ma_cross  # noqa: F401 — register strategy
 import core.strategies.rsi  # noqa: F401 — register strategy
 from backtest.broker.simulated import SimulatedBroker
@@ -21,40 +23,62 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config(args.config)
-    mode: str = config["mode"]
-    symbol: str = config["symbol"]
-    timeframe: str = config["timeframe"]
-
     pipeline = TradingPipeline.from_config(config)
     datasource = build_datasource(config)
 
-    if mode == "backtest":
-        _run_backtest(config, symbol, timeframe, pipeline, datasource)
+    if config["mode"] == "backtest":
+        _run_backtest(config, pipeline, datasource)
     else:
-        _run_live(config, symbol, timeframe, pipeline, datasource)
+        _run_live(config, pipeline, datasource)
 
 
 # ---------------------------------------------------------------------------
-# Backtest: load full bar history, replay step-by-step in a rolling window
+# Backtest: replay primary context bar-by-bar; slice all other contexts by
+# timestamp so different timeframes stay causal.
 # ---------------------------------------------------------------------------
 
-def _run_backtest(config, symbol, timeframe, pipeline: TradingPipeline, datasource) -> None:
+def _run_backtest(config, pipeline: TradingPipeline, datasource) -> None:
     data_cfg = config.get("data", {})
     warmup_bars: int = config.get("backtest", {}).get("warmup_bars", 50)
 
-    bars = datasource.load_bars(
-        symbol=symbol,
-        timeframe=timeframe,
-        start=data_cfg.get("start"),
-        end=data_cfg.get("end"),
-    )
+    # Load full bar history for every declared context.
+    all_bars: dict[tuple[str, str], pd.DataFrame] = {
+        (spec.symbol, spec.timeframe): datasource.load_bars(
+            symbol=spec.symbol,
+            timeframe=spec.timeframe,
+            start=data_cfg.get("start"),
+            end=data_cfg.get("end"),
+        )
+        for spec in pipeline.context_specs
+    }
+
+    primary = pipeline.primary_spec
+    primary_bars = all_bars[(primary.symbol, primary.timeframe)]
 
     broker = SimulatedBroker()
     signals: list[dict[str, Any]] = []
 
-    for end_idx in range(warmup_bars, len(bars)):
-        window = bars.iloc[: end_idx + 1]
-        _, signal = pipeline.step(symbol, timeframe, window)
+    for end_idx in range(warmup_bars, len(primary_bars)):
+        current_ts: pd.Timestamp = primary_bars.index[end_idx]
+
+        bars_map: dict[tuple[str, str], pd.DataFrame] = {}
+        for spec in pipeline.context_specs:
+            key = (spec.symbol, spec.timeframe)
+            bars = all_bars[key]
+            if key == (primary.symbol, primary.timeframe):
+                # Primary: row-based window
+                bars_map[key] = bars.iloc[: end_idx + 1]
+            else:
+                # Other contexts: include all bars whose starttime <= current bar
+                window = bars[bars.index <= current_ts]
+                if not window.empty:
+                    bars_map[key] = window
+
+        if len(bars_map) < len(pipeline.context_specs):
+            # Some non-primary context has no data yet; skip until warmup complete
+            continue
+
+        _, signal = pipeline.step(bars_map)
         broker.handle(signal)
         signals.append({
             "timestamp": signal.timestamp,
@@ -64,10 +88,10 @@ def _run_backtest(config, symbol, timeframe, pipeline: TradingPipeline, datasour
             "confidence": signal.confidence,
         })
 
-    active_index = bars.index[warmup_bars:]
+    active_index = primary_bars.index[warmup_bars:]
     positions = broker.position_series(index=active_index)
     forward_returns = (
-        bars["close"].pct_change().shift(-1).reindex(active_index).fillna(0.0)
+        primary_bars["close"].pct_change().shift(-1).reindex(active_index).fillna(0.0)
     )
     strategy_returns = positions.shift(1).fillna(0.0) * forward_returns
     equity_curve = (1.0 + strategy_returns).cumprod()
@@ -80,15 +104,22 @@ def _run_backtest(config, symbol, timeframe, pipeline: TradingPipeline, datasour
 
 
 # ---------------------------------------------------------------------------
-# Live: load latest N bars (indicator warmup window), run one step
+# Live: load latest N bars per context (indicator warmup window), one step.
 # ---------------------------------------------------------------------------
 
-def _run_live(config, symbol, timeframe, pipeline: TradingPipeline, datasource) -> None:
+def _run_live(config, pipeline: TradingPipeline, datasource) -> None:
     data_cfg = config.get("data", {})
     exec_cfg = config.get("execution", {})
     window_size: int = data_cfg.get("window_size", 200)
 
-    bars = datasource.load_latest(symbol=symbol, timeframe=timeframe, n=window_size)
+    bars_map: dict[tuple[str, str], pd.DataFrame] = {
+        (spec.symbol, spec.timeframe): datasource.load_latest(
+            symbol=spec.symbol,
+            timeframe=spec.timeframe,
+            n=window_size,
+        )
+        for spec in pipeline.context_specs
+    }
 
     state = PositionState()
     executor = HttpSignalExecutor(
@@ -97,14 +128,14 @@ def _run_live(config, symbol, timeframe, pipeline: TradingPipeline, datasource) 
         dry_run=exec_cfg.get("dry_run", True),
     )
 
-    _, signal = pipeline.step(symbol, timeframe, bars)
+    _, signal = pipeline.step(bars_map)
     state.update(signal)
     execution = executor.handle(signal)
 
     print({
         "signal": {**asdict(signal), "timestamp": signal.timestamp.isoformat()},
         "execution": execution,
-        "position": state.get(symbol),
+        "position": state.get(signal.symbol),
     })
 
 

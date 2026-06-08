@@ -1,30 +1,22 @@
 mode: live
-symbol: BTCUSDT
-timeframe: 1m
 
-# MongoDB connection (remove to use synthetic dev fallback)
 mongo:
   uri: mongodb://localhost:27017
   db: market_info
   exchange: Binance
 
-data:
-  # Number of recent closed bars to load as the indicator warmup window.
-  # Must be >= max(indicator lookback) + a safety margin.
-  window_size: 200
-  # Synthetic fallback params (only used when mongo section is absent)
-  start: 2024-01-01
-  periods: 200
-  seed: 7
-
-indicators:
-  - name: rsi
-    params:
-      length: 14
-  - name: super_trend
-    params:
-      length: 10
-      factor: 5.0
+contexts:
+  - symbol: BTCUSDT
+    timeframe: 1m
+    primary: true
+    indicators:
+      - name: rsi
+        params:
+          length: 14
+      - name: super_trend
+        params:
+          length: 10
+          factor: 5.0
 
 strategy:
   name: rsi
@@ -33,6 +25,11 @@ strategy:
     oversold: 35
     overbought: 65
     max_position: 0.5
+
+data:
+  # Bars loaded per context for indicator warmup.
+  # Must be >= max(indicator lookback) + safety margin.
+  window_size: 200
 
 execution:
   endpoint: http://localhost:8080/signal

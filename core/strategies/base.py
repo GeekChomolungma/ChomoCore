@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from core.context.market_context import MarketContext
+from core.context.market_bundle import MarketBundle
 from core.signal.signal import StrategySignal
 
 
@@ -11,10 +11,12 @@ class BaseStrategy(ABC):
         self.strategy_name = strategy_name
 
     @abstractmethod
-    def evaluate(self, context: MarketContext) -> StrategySignal:
+    def evaluate(self, bundle: MarketBundle) -> StrategySignal:
         """
-        Consume a standardized MarketContext and return a StrategySignal.
-        Must be free of look-ahead bias: only context.bars rows up to
-        context.timestamp may influence the output.
+        Consume a MarketBundle and return a StrategySignal.
+
+        Single-asset strategies use bundle.primary.
+        Multi-asset / multi-timeframe strategies look up additional contexts
+        via bundle.get(symbol, timeframe).
         """
         raise NotImplementedError
